@@ -73,7 +73,7 @@ CORS: browser requests are accepted only from `https://txtshell.com`, `https://w
 
 ### Path A — Deploy to Cloudflare button (recommended for most users)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/txtshell/txtshell-sync)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/gitkvn/txtshell-sync)
 
 Clicking the button has Cloudflare fork the repo to your account, provision the R2 bucket from `wrangler.toml`, deploy the Worker, and set up auto-deploy on future pulls. During the deploy, Cloudflare prompts for **AUTH_SECRET** as a field — paste a generated random value there (e.g. the output of `openssl rand -hex 32`, or any long random string from a password manager). No terminal needed for Path A; keep a copy of the value to paste into Txtshell.
 
@@ -89,7 +89,7 @@ npm install -g wrangler
 wrangler login
 
 # 3. Clone the Worker repo
-git clone https://github.com/txtshell/txtshell-sync.git
+git clone https://github.com/gitkvn/txtshell-sync.git
 cd txtshell-sync
 
 # 4. Create the R2 bucket
