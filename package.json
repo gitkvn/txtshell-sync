@@ -12,5 +12,12 @@
     "@cloudflare/workers-types": "^4.20260613.1",
     "typescript": "^6.0.3",
     "wrangler": "^4.100.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "AUTH_SECRET": {
+        "description": "A random auth token for your Worker. Paste any long random string (a password manager generator works well), or run: openssl rand -hex 32. Keep a copy — you'll paste it into Txtshell's sync setup."
+      }
+    }
   }
 }

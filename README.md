@@ -63,7 +63,7 @@ Every request must include:
 Authorization: Bearer <token>
 ```
 
-- A single shared token per Worker (v1). Set via `wrangler secret put AUTH_SECRET`.
+- A single shared token per Worker (v1). Set either via the Deploy-to-Cloudflare button's AUTH_SECRET field (Path A) or with `wrangler secret put AUTH_SECRET` (Path B / rotation).
 - The token is compared in constant time to defend against timing attacks.
 - The token is accepted **only** via the `Authorization` header — never query parameters, body fields, or cookies. Any request lacking a valid bearer token gets `401`.
 
@@ -75,12 +75,7 @@ CORS: browser requests are accepted only from `https://txtshell.com`, `https://w
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/txtshell/txtshell-sync)
 
-Clicking the button has Cloudflare fork the repo to your account, provision the R2 bucket from `wrangler.toml`, deploy the Worker, and set up auto-deploy on future pulls. Then set the auth secret once:
-
-```bash
-wrangler secret put AUTH_SECRET --name txtshell-sync
-# Paste a value generated with:  openssl rand -hex 32
-```
+Clicking the button has Cloudflare fork the repo to your account, provision the R2 bucket from `wrangler.toml`, deploy the Worker, and set up auto-deploy on future pulls. During the deploy, Cloudflare prompts for **AUTH_SECRET** as a field — paste a generated random value there (e.g. the output of `openssl rand -hex 32`, or any long random string from a password manager). No terminal needed for Path A; keep a copy of the value to paste into Txtshell.
 
 Paste the resulting Worker URL into Txtshell.
 
