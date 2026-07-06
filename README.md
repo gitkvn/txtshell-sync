@@ -2,6 +2,13 @@
 
 A Cloudflare Worker providing encrypted blob storage and an append-only inbox for [Txtshell](https://txtshell.com). It is a **thin storage layer**: it stores and returns ciphertext, and never decrypts, inspects, or logs your data.
 
+> **This is optional, advanced infrastructure for technical users.** Txtshell is a
+> local-first, end-to-end encrypted notes app that works fully **without** any of this —
+> notes live in your browser, and you move or back them up with an encrypted export file.
+> You only need this Worker if you want notes to sync **automatically** across devices and
+> you're comfortable deploying to your own Cloudflare account. If that's not you, ignore
+> this repo entirely and use Txtshell's built-in export/import.
+
 ## What this is
 
 - **Single-user, self-hosted.** Each user deploys their own Worker on their own Cloudflare account. There is no central Txtshell-operated backend.
@@ -9,7 +16,6 @@ A Cloudflare Worker providing encrypted blob storage and an append-only inbox fo
 - **Minimal surface.** R2 storage only — no Durable Objects, KV, or D1. Stateless beyond R2.
 
 If you don't run a Worker, Txtshell still works as a pure local-first tool with encrypted export for cross-device transfer. The Worker is optional sync infrastructure.
-
 ## Endpoints
 
 All endpoints are versioned under `/v1`. Auth is required on all of them (see [Authentication](#authentication)).
