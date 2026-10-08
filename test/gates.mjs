@@ -10,7 +10,9 @@
 //   new Worker  = src/worker.ts (this checkout)        on https://localhost:8789
 //   old Worker  = src/worker.ts at 19e3a98 (shipped)   on https://localhost:8790
 //   new app     = ../txtshell (this checkout)          old app = txtshell at dd76bf7 (shipped)
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0"; // the gate's own fetches to the self-signed local Workers
+// The local Workers run under wrangler's self-signed certificate, so certificate verification is
+// off ONLY for a local run. Remote mode (REMOTE_URL) talks to a real HTTPS endpoint and verifies.
+if (!process.env.REMOTE_URL) process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 import { spawn, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -280,6 +282,7 @@ console.log(`\n--- (4) G-D5 at the API (${REMOTE ? REMOTE.url : "new Worker, loc
   const put = (body, ifMatch, extra = {}) => fetch(`${NEW_BASE}/v1/blocks`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN_USED}`, "Content-Type": "application/octet-stream", ...(ifMatch !== undefined ? { "If-Match": ifMatch } : {}), ...extra }, body });
   const get = (ifNoneMatch) => fetch(`${NEW_BASE}/v1/blocks`, { headers: { Authorization: `Bearer ${TOKEN_USED}`, ...(ifNoneMatch ? { "If-None-Match": ifNoneMatch } : {}) } });
   if (REMOTE) {
+    check(process.env.NODE_TLS_REJECT_UNAUTHORIZED !== "0", "remote mode verifies the deployment's TLS certificate (no NODE_TLS_REJECT_UNAUTHORIZED=0)");
     // Save and restore the deployment's blob: the checks below overwrite it.
     const saved = await get();
     REMOTE.saved = saved.status === 200 ? Buffer.from(await saved.arrayBuffer()) : null;
