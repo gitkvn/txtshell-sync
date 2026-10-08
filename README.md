@@ -128,7 +128,9 @@ Same as Path B, with these specifics:
 1. Worker name: `txtshell-sync`
 2. R2 bucket `txtshell-sync-storage` **already exists** — skip step 4 (bucket create)
 3. Auth secret generated with `openssl rand -hex 32`, stored in 1Password
-4. Custom domain `sync.txtshell.com`, configured in the Cloudflare dashboard post-deploy
+4. Custom domain `sync.txtshell.com`, configured in the Cloudflare dashboard once; it is declared
+   in `wrangler.toml` under `[env.reference]`, so redeploy with `npm run deploy:reference`
+   (a plain `wrangler deploy` offers to remove the domain — answer no)
 5. Run the full curl smoke test below before configuring the desktop client
 
 ## Post-deploy verification

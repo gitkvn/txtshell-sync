@@ -5,3 +5,15 @@ compatibility_date = "2026-01-01"
 [[r2_buckets]]
 binding = "STORAGE"
 bucket_name = "txtshell-sync-storage"
+
+# Kavan's reference deployment (README "Path C"): the same Worker, deployed with its custom domain
+# declared so `wrangler deploy` does not offer to remove it. Self-hosters deploy the top level and
+# never use this environment — their accounts do not own txtshell.com.
+#   npm run deploy:reference   (= wrangler deploy --env reference)
+[env.reference]
+name = "txtshell-sync"
+routes = [{ pattern = "sync.txtshell.com", custom_domain = true }]
+
+[[env.reference.r2_buckets]]
+binding = "STORAGE"
+bucket_name = "txtshell-sync-storage"
