@@ -22,17 +22,21 @@ All endpoints are versioned under `/v1`. Auth is required on all of them (see [A
 
 | Method   | Path          | Purpose                              |
 | -------- | ------------- | ------------------------------------ |
-| `PUT`    | `/v1/blocks`  | Overwrite the encrypted blocks blob  |
-| `GET`    | `/v1/blocks`  | Fetch the encrypted blocks blob      |
+| `PUT`    | `/v1/blocks`  | Replace the encrypted blocks blob (conditional on `If-Match`, or unconditional without it) |
+| `GET`    | `/v1/blocks`  | Fetch the encrypted blocks blob (`If-None-Match` → `304` when unchanged) |
 | `POST`   | `/v1/inbox`   | Append an encrypted inbox entry      |
 | `GET`    | `/v1/inbox`   | Fetch the full inbox                 |
 | `DELETE` | `/v1/inbox`   | Remove specified entry IDs from inbox |
 
 ### Request/response shapes
 
-**`PUT /v1/blocks`** — Body: raw encrypted bytes. → `200 { "ok": true }`
+**`PUT /v1/blocks`** — Body: raw encrypted bytes.
+- With `If-Match: "g<N>"` (the generation this device last synced; `"g0"` = "no blob yet"): the write happens only if the cloud is at generation N → `204` with `ETag: "g<N+1>"`. Otherwise `412 { "error": "generation-mismatch", "current": <N> }` and nothing is written — the client pulls, compares, and lets you choose.
+- Without `If-Match`: unconditional overwrite, as this Worker has always done → `200 { "ok": true, "generation": <N+1> }` with the same `ETag`. Older clients keep working unchanged.
 
-**`GET /v1/blocks`** — → `200` raw bytes, `Content-Type: application/octet-stream`. If no blob exists: `404 { "error": "no-blob", ... }`.
+**`GET /v1/blocks`** — → `200` raw bytes, `Content-Type: application/octet-stream`, `ETag: "g<N>"`, `X-Blob-Generation: N`. With `If-None-Match: "g<N>"` matching the current generation → `304` (no body). If no blob exists: `404 { "error": "no-blob", ... }` with `X-Blob-Generation: 0`.
+
+The generation is stored in the object's R2 custom metadata and starts at 1; a blob written by an older version of this Worker counts as generation 1 on the first conditional write. `ETag` and `X-Blob-Generation` are exposed to browsers (`Access-Control-Expose-Headers`), and `If-Match` / `If-None-Match` are allowed in the CORS preflight.
 
 **`POST /v1/inbox`** — Body: JSON `{ id, ciphertext, iv, createdAt }` (all strings). → `200 { "id": "...", "accepted": true }`. If the inbox already holds 1000+ entries: `413 { "error": "inbox-full", ... }`.
 
@@ -54,9 +58,11 @@ All errors use a consistent JSON shape — switch on `error`, display `message`:
 | 400    | `bad-request`          | Malformed JSON or invalid body shape          |
 | 401    | `unauthorized`         | Missing or invalid bearer token               |
 | 403    | `forbidden-origin`     | `Origin` header not in the allow-list         |
+| 400    | `bad-if-match`         | `If-Match` present but not of the form `"g<N>"` |
 | 404    | `no-blob`              | `GET /v1/blocks` with no stored blob          |
 | 404    | `not-found`            | Unknown path                                  |
 | 405    | `method-not-allowed`   | Unsupported method (globally or on that path) |
+| 412    | `generation-mismatch`  | `PUT /v1/blocks` with an `If-Match` that is not the cloud's current generation (`current` in the body) |
 | 413    | `payload-too-large`    | Body exceeds the 5MB limit                    |
 | 413    | `inbox-full`           | Inbox at 1000-entry capacity                  |
 | 500    | `internal-error`       | Unexpected failure (e.g. corrupt stored state) |
@@ -228,7 +234,7 @@ Cloudflare metadata exposure is an inherent tradeoff of using a hosted edge serv
 
 The desktop's IndexedDB is canonical; the cloud blob is a backup.
 
-1. Force a re-upload from desktop (`/mirror push` or equivalent) — overwrites the corrupted blob
+1. Force a re-upload from desktop: add or edit any block (every save pushes); if the push is refused with a conflict card, choose "Keep local, overwrite cloud"
 2. iOS re-fetches on next sync
 3. If desktop also lacks the blocks (fresh reinstall): restore from an encrypted export file if available; otherwise the blocks may be unrecoverable
 
@@ -240,12 +246,16 @@ The desktop's IndexedDB is canonical; the cloud blob is a backup.
 4. Repeat for `inbox.json` if non-empty
 5. Update desktop and iOS clients with the new URL and token
 
+## Updating an existing deployment
+
+Redeploy (Path A deployments redeploy from the repository; Path B is `wrangler deploy`). No data migration: the first conditional write treats an existing blob as generation 1 and writes 2. Either side can update first — an older app sends no `If-Match` and gets the unconditional path; a newer app against an older Worker sees no `ETag`, keeps pushing unconditionally, and shows a one-time "update your sync Worker" hint.
+
 ## Known limitations and accepted risks
 
 - **No per-request rate limiting.** An attacker holding the auth token could burn through your Workers request quota. Cloudflare provides platform DDoS protection but not per-token rate limiting on the free tier. Mitigation: keep the token secret; rotate if abused; enable paid Rate Limiting if needed. Accepted for v1.
 - **No automated tests.** The Worker is ~150 LOC across 5 endpoints; manual curl testing is sufficient for v1. Add tests if it grows.
 - **No metadata privacy from Cloudflare.** See threat model. Inherent, not a bug.
-- **Last-writer-wins.** Near-simultaneous `PUT /v1/blocks` from two devices: the second overwrites the first. No merge/conflict detection. Acceptable for single-user multi-device where concurrent editing is rare.
+- **Whole-blob replace with conflict detection, no merge.** Two devices editing at once: the second push is refused (`412`) and that device is shown what differs and chooses a side; a client that sends no `If-Match` (older app builds, the iOS client) still overwrites unconditionally. Acceptable for single-user multi-device where concurrent editing is rare.
 - **Single point of failure: Cloudflare.** During an outage the Worker is down; desktop and iOS continue with local data and queue sync for reconnect.
 - **Master-key compromise is catastrophic.** If your master key is exfiltrated from any device, all uploaded ciphertext becomes decryptable. Recovery is full master-key rotation — intentionally a significant operation.
 

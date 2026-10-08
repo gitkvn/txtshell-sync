@@ -18,6 +18,14 @@ const INBOX_KEY = `users/${USER_ID}/inbox.json`;
 const MAX_BODY_BYTES = 5 * 1024 * 1024; // 5MB
 const INBOX_CAP = 1000;
 
+// Conditional PUT (generation CAS). The blob's generation lives in R2 customMetadata and is
+// returned as ETag "g<N>" (+ X-Blob-Generation: N). A client that sends If-Match: "g<N>" gets
+// 412 if the cloud has moved on; a client that sends no If-Match overwrites unconditionally,
+// exactly as before — so neither an older app nor an older Worker breaks whichever updates first.
+const GENERATION_META = "generation";
+const CORS_ALLOW_HEADERS = "Authorization, Content-Type, If-Match, If-None-Match";
+const CORS_EXPOSE_HEADERS = "ETag, X-Blob-Generation";
+
 const ALLOWED_ORIGINS = [
   "https://txtshell.com",
   "https://www.txtshell.com",
@@ -52,9 +60,30 @@ function baseHeaders(origin: string | null): Record<string, string> {
   // Reflect the request origin only if it's allow-listed (handles >1 allowed origin).
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     h["Access-Control-Allow-Origin"] = origin;
+    h["Access-Control-Expose-Headers"] = CORS_EXPOSE_HEADERS; // the browser hides ETag cross-origin otherwise
     h["Vary"] = "Origin";
   }
   return h;
+}
+
+/** The generation headers for a blob at generation N. */
+function generationHeaders(generation: number): Record<string, string> {
+  return { ETag: `"g${generation}"`, "X-Blob-Generation": String(generation) };
+}
+
+/** Parses If-Match / If-None-Match of the form "g<N>" (quotes optional, weak prefix tolerated). */
+function parseGeneration(header: string | null): number | null {
+  if (header === null) return null;
+  const m = header.trim().match(/^(?:W\/)?"?g(\d+)"?$/);
+  return m ? Number(m[1]) : null;
+}
+
+/** The generation an existing object carries; an object written before this Worker knew about
+ *  generations counts as generation 1. */
+function generationOf(obj: R2Object): number {
+  const raw = obj.customMetadata?.[GENERATION_META];
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(n) && n >= 1 ? n : 1;
 }
 
 function jsonResponse(
@@ -101,7 +130,7 @@ export default {
         headers: {
           ...baseHeaders(origin),
           "Access-Control-Allow-Methods": "GET, PUT, POST, DELETE",
-          "Access-Control-Allow-Headers": "Authorization, Content-Type",
+          "Access-Control-Allow-Headers": CORS_ALLOW_HEADERS,
           "Access-Control-Max-Age": "86400",
         },
       });
@@ -140,7 +169,7 @@ export default {
     try {
       if (path === "/v1/blocks") {
         if (request.method === "PUT") return await putBlocks(request, env, origin);
-        if (request.method === "GET") return await getBlocks(env, origin);
+        if (request.method === "GET") return await getBlocks(request, env, origin);
         return errorResponse(405, "method-not-allowed", "Method not supported on this endpoint", origin);
       }
       if (path === "/v1/inbox") {
@@ -165,20 +194,56 @@ async function putBlocks(request: Request, env: Env, origin: string | null): Pro
   if (body.byteLength > MAX_BODY_BYTES) {
     return errorResponse(413, "payload-too-large", "Request body exceeds 5MB limit", origin);
   }
-  await env.STORAGE.put(BLOCKS_KEY, body);
-  return jsonResponse(200, { ok: true }, origin);
+  const ifMatch = request.headers.get("If-Match");
+  const expected = parseGeneration(ifMatch);
+  if (ifMatch !== null && expected === null) {
+    return errorResponse(400, "bad-if-match", 'If-Match must be "g<generation>"', origin);
+  }
+
+  if (expected === null) {
+    // Legacy / unconditional: overwrite, as this Worker always has. The new generation is
+    // still recorded and returned so a client that understands it can start from here.
+    const current = await env.STORAGE.head(BLOCKS_KEY);
+    const next = current === null ? 1 : generationOf(current) + 1;
+    await env.STORAGE.put(BLOCKS_KEY, body, { customMetadata: { [GENERATION_META]: String(next) } });
+    return jsonResponse(200, { ok: true, generation: next }, origin, generationHeaders(next));
+  }
+
+  // Conditional: the client's base must be the cloud's generation. The write itself is also
+  // conditional on R2's own etag so two writers with the same base cannot both win.
+  const current = await env.STORAGE.head(BLOCKS_KEY);
+  const currentGeneration = current === null ? 0 : generationOf(current);
+  if (currentGeneration !== expected) {
+    return jsonResponse(412, { error: "generation-mismatch", message: "The cloud copy has changed since this device last synced", current: currentGeneration }, origin, generationHeaders(currentGeneration));
+  }
+  const next = currentGeneration + 1;
+  const onlyIf: R2Conditional = current === null ? { etagDoesNotMatch: "*" } : { etagMatches: current.etag };
+  const written = await env.STORAGE.put(BLOCKS_KEY, body, { customMetadata: { [GENERATION_META]: String(next) }, onlyIf });
+  if (written === null) {
+    // Lost the race between head() and put(): report what is there now.
+    const now = await env.STORAGE.head(BLOCKS_KEY);
+    const nowGeneration = now === null ? 0 : generationOf(now);
+    return jsonResponse(412, { error: "generation-mismatch", message: "The cloud copy has changed since this device last synced", current: nowGeneration }, origin, generationHeaders(nowGeneration));
+  }
+  return new Response(null, { status: 204, headers: { ...baseHeaders(origin), ...generationHeaders(next) } });
 }
 
-async function getBlocks(env: Env, origin: string | null): Promise<Response> {
+async function getBlocks(request: Request, env: Env, origin: string | null): Promise<Response> {
   const obj = await env.STORAGE.get(BLOCKS_KEY);
   if (obj === null) {
-    return errorResponse(404, "no-blob", "No blocks blob exists for this user", origin);
+    return jsonResponse(404, { error: "no-blob", message: "No blocks blob exists for this user" }, origin, { "X-Blob-Generation": "0" });
+  }
+  const generation = generationOf(obj);
+  const ifNoneMatch = parseGeneration(request.headers.get("If-None-Match"));
+  if (ifNoneMatch !== null && ifNoneMatch === generation) {
+    return new Response(null, { status: 304, headers: { ...baseHeaders(origin), ...generationHeaders(generation) } });
   }
   return new Response(obj.body, {
     status: 200,
     headers: {
       "Content-Type": "application/octet-stream",
       ...baseHeaders(origin),
+      ...generationHeaders(generation),
     },
   });
 }
