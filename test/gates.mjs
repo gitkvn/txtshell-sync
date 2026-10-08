@@ -43,12 +43,36 @@ const CHROME = process.env.CHROME || defaultChrome();
 
 let failures = 0;
 const check = (c, m) => { console.log(`${c ? "PASS" : "FAIL"}  ${m}`); if (!c) failures++; return !!c; };
+// Harness rule: a skipped part is printed every run with its reason and counted in the last line.
+const skips = [];
+const skipped = (part, reason) => { skips.push(part); console.log(`SKIP  ${part} — ${reason}`); };
+const summary = () => `${failures === 0 ? "ALL PASSED" : failures + " FAILURE(S)"}${skips.length ? ` · ${skips.length} part(s) SKIPPED: ${skips.join("; ")}` : " · nothing skipped"}`;
+// REMOTE_URL + REMOTE_TOKEN: run the API-level checks (part 4) against a real deployment and
+// nothing else (G-D5's "repeated against the real deployment once"). The browser matrix, the old
+// Worker and the empty-store race need local Workers and are skipped, said so below.
+const REMOTE = process.env.REMOTE_URL ? { url: process.env.REMOTE_URL.replace(/\/+$/, ""), token: process.env.REMOTE_TOKEN || "" } : null;
+if (REMOTE && !REMOTE.token) { console.error("REMOTE_TOKEN is required with REMOTE_URL"); process.exit(2); }
 const procs = [];
 process.on("exit", () => procs.forEach((p) => { try { p.kill(); } catch {} }));
 async function waitFor(fn, ms = 15000) { const end = Date.now() + ms; while (Date.now() < end) { try { if (await fn()) return true; } catch {} await sleep(100); } return false; }
 
+if (REMOTE) {
+  skipped("(1) old app × new Worker, (2) new app × old Worker, (3) new app × new Worker in a real browser", `REMOTE_URL set: only the API-level checks run, against ${REMOTE.url}`);
+  skipped("(5) first-upload race on an empty store", "needs a Worker on an empty store; local R2 honours etagDoesNotMatch \"*\" (recorded locally)");
+}
 // ---------- materialise the shipped versions ----------
 const scratch = mkdtempSync(path.join(tmpdir(), "txtshell-sync-gates-"));
+let NEW_BASE = REMOTE ? REMOTE.url : NEW; let TOKEN_USED = REMOTE ? REMOTE.token : TOKEN;
+let ws = null;
+function startWorker(name, configDir, port, persist) {
+  // Always run wrangler from this checkout (its node_modules); point it at the config to use.
+  const args = ["wrangler", "dev", "--config", path.join(configDir, "wrangler.toml"), "--local", "--local-protocol", "https", "--port", String(port), "--inspector-port", String(port + 1000), "--var", `AUTH_SECRET:${TOKEN}`, "--persist-to", persist];
+  const p = spawn("npx", args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+  procs.push(p);
+  const log = []; p.stdout.on("data", (d) => log.push(String(d))); p.stderr.on("data", (d) => log.push(String(d)));
+  return { name, log };
+}
+if (!REMOTE) {
 const oldWorkerDir = path.join(scratch, "old-worker"); mkdirSync(path.join(oldWorkerDir, "src"), { recursive: true });
 writeFileSync(path.join(oldWorkerDir, "src/worker.ts"), execFileSync("git", ["show", `${OLD_WORKER_REV}:src/worker.ts`], { cwd: ROOT, encoding: "utf8" }));
 writeFileSync(path.join(oldWorkerDir, "wrangler.toml"), `name = "txtshell-sync-old"\nmain = "src/worker.ts"\ncompatibility_date = "2026-01-01"\n[[r2_buckets]]\nbinding = "STORAGE"\nbucket_name = "txtshell-sync-storage"\n`);
@@ -59,14 +83,6 @@ check(existsSync(path.join(oldAppDir, "app.js")) && !existsSync(path.join(oldApp
 // ---------- the two Workers ----------
 async function portFree(port) { return !(await fetch(`http://127.0.0.1:${port}/`).then(() => true, () => false)) && !(await fetch(`https://127.0.0.1:${port}/`).then(() => true, () => false)); }
 for (const port of [NEW_PORT, OLD_PORT, CDP_PORT]) if (!(await waitFor(() => portFree(port), 30000))) { console.error(`port ${port} still in use`); process.exit(2); }
-function startWorker(name, configDir, port, persist) {
-  // Always run wrangler from this checkout (its node_modules); point it at the config to use.
-  const args = ["wrangler", "dev", "--config", path.join(configDir, "wrangler.toml"), "--local", "--local-protocol", "https", "--port", String(port), "--inspector-port", String(port + 1000), "--var", `AUTH_SECRET:${TOKEN}`, "--persist-to", persist];
-  const p = spawn("npx", args, { cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
-  procs.push(p);
-  const log = []; p.stdout.on("data", (d) => log.push(String(d))); p.stderr.on("data", (d) => log.push(String(d)));
-  return { name, log };
-}
 const newWorker = startWorker("new", ROOT, NEW_PORT, path.join(scratch, "state-new"));
 const oldWorker = startWorker("old", oldWorkerDir, OLD_PORT, path.join(scratch, "state-old"));
 for (const [base, w] of [[NEW, newWorker], [OLD, oldWorker]]) {
@@ -91,7 +107,7 @@ await new Promise((r) => server.listen(APP_PORT, r));
 const chrome = spawn(CHROME, ["--headless=new", `--remote-debugging-port=${CDP_PORT}`, `--user-data-dir=${path.join(scratch, "profile")}`, "--no-first-run", "--ignore-certificate-errors", "--disable-gpu", "about:blank"], { stdio: "ignore" });
 procs.push(chrome);
 let wsUrl; for (let i = 0; i < 60 && !wsUrl; i++) { try { wsUrl = (await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`)).json()).webSocketDebuggerUrl; } catch {} if (!wsUrl) await sleep(250); }
-const ws = new WebSocket(wsUrl); await new Promise((r) => (ws.onopen = r));
+ws = new WebSocket(wsUrl); await new Promise((r) => (ws.onopen = r));
 let nextId = 1; const pending = new Map(); const listeners = [];
 ws.onmessage = (ev) => { const m = JSON.parse(ev.data); if (m.id && pending.has(m.id)) { const p = pending.get(m.id); pending.delete(m.id); m.error ? p.reject(new Error(JSON.stringify(m.error))) : p.resolve(m.result); } else if (m.method) for (const fn of listeners) fn(m); };
 const send = (method, params = {}, sessionId) => new Promise((resolve, reject) => { const id = nextId++; pending.set(id, { resolve, reject }); ws.send(JSON.stringify({ id, method, params, sessionId })); });
@@ -250,17 +266,25 @@ console.log("\n--- (3) NEW app × NEW Worker: generations, 304, 412 → pull →
   await D.pull();
   check(await waitFor(() => D.view().then((v) => v === "pull-conflict")), "D /pull → card (E's overwrite)");
   await D.click("replace"); await waitFor(() => D.view().then((v) => v === null)); await D.settle();
-  // Replace re-saves the adopted set, and those saves push it straight back (conditional on the
-  // generation just pulled), so D ends one generation past what it pulled.
+  // Replace adopts the cloud set and records its generation; under conditional sync the app no
+  // longer re-pushes the identical set (that only moved the generation under every other device).
   const putsD = D.blocksTrace().filter((x) => x.startsWith("PUT"));
-  check((await D.entries()).includes("e1") && (await gen(D)) >= gE + 2 && putsD.at(-1).includes(`If-Match="g${gE + 2}"`) && /PUT 204/.test(putsD.at(-1)), `D Replace → E's set; its re-push was conditional on the pulled generation ${gE + 2}: ${putsD.at(-1)} → generation ${await gen(D)}`);
+  check((await D.entries()).includes("e1") && (await gen(D)) === gE + 2 && !putsD.some((x) => x.includes(`If-Match="g${gE + 2}"`)), `D Replace → E's set at the pulled generation ${gE + 2}, no re-push of the identical set (last PUT: ${putsD.at(-1)})`);
 }
 
+} // end of the local-only parts (1)–(3)
+
 // ============================================================================
-console.log("\n--- (4) G-D5 at the API (new Worker): lenient, 304, concurrent CAS, stale replay, metadata, preflight");
+console.log(`\n--- (4) G-D5 at the API (${REMOTE ? REMOTE.url : "new Worker, local"}): lenient, 304, concurrent CAS, stale replay, metadata, preflight`);
 {
-  const put = (body, ifMatch, extra = {}) => fetch(`${NEW}/v1/blocks`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/octet-stream", ...(ifMatch !== undefined ? { "If-Match": ifMatch } : {}), ...extra }, body });
-  const get = (ifNoneMatch) => fetch(`${NEW}/v1/blocks`, { headers: { Authorization: `Bearer ${TOKEN}`, ...(ifNoneMatch ? { "If-None-Match": ifNoneMatch } : {}) } });
+  const put = (body, ifMatch, extra = {}) => fetch(`${NEW_BASE}/v1/blocks`, { method: "PUT", headers: { Authorization: `Bearer ${TOKEN_USED}`, "Content-Type": "application/octet-stream", ...(ifMatch !== undefined ? { "If-Match": ifMatch } : {}), ...extra }, body });
+  const get = (ifNoneMatch) => fetch(`${NEW_BASE}/v1/blocks`, { headers: { Authorization: `Bearer ${TOKEN_USED}`, ...(ifNoneMatch ? { "If-None-Match": ifNoneMatch } : {}) } });
+  if (REMOTE) {
+    // Save and restore the deployment's blob: the checks below overwrite it.
+    const saved = await get();
+    REMOTE.saved = saved.status === 200 ? Buffer.from(await saved.arrayBuffer()) : null;
+    console.log(`      deployment blob before: ${saved.status === 200 ? `${REMOTE.saved.length} bytes at ${saved.headers.get("etag") || "(no ETag — an OLD Worker is deployed there)"}` : saved.status}`);
+  }
   const gen = (r) => (r.headers.get("etag") || "").replace(/\D/g, "");
   let r = await put("unconditional-1");
   const g = Number(gen(r));
@@ -289,18 +313,23 @@ console.log("\n--- (4) G-D5 at the API (new Worker): lenient, 304, concurrent CA
   // First-upload race on an EMPTY store (etagDoesNotMatch: "*"): recorded, whatever local R2 does.
   const fresh = `https://localhost:${NEW_PORT}`; // same Worker; empty the key through an unconditional 0-byte PUT is not deletion — so record the behaviour via a fresh persist dir instead
   void fresh;
-  const pre = await fetch(`${NEW}/v1/blocks`, { method: "OPTIONS", headers: { Origin: APP, "Access-Control-Request-Method": "PUT", "Access-Control-Request-Headers": "authorization,content-type,if-match" } });
+  const pre = await fetch(`${NEW_BASE}/v1/blocks`, { method: "OPTIONS", headers: { Origin: APP, "Access-Control-Request-Method": "PUT", "Access-Control-Request-Headers": "authorization,content-type,if-match" } });
   const allow = pre.headers.get("access-control-allow-headers") || "";
   check(pre.status === 204 && /If-Match/i.test(allow) && /If-None-Match/i.test(allow), `preflight allow-headers: ${allow}`);
-  const exposed = (await fetch(`${NEW}/v1/blocks`, { headers: { Authorization: `Bearer ${TOKEN}`, Origin: APP } })).headers.get("access-control-expose-headers") || "";
+  const exposed = (await fetch(`${NEW_BASE}/v1/blocks`, { headers: { Authorization: `Bearer ${TOKEN_USED}`, Origin: REMOTE ? "https://txtshell.com" : APP } })).headers.get("access-control-expose-headers") || "";
   check(/ETag/i.test(exposed) && /X-Blob-Generation/i.test(exposed), `exposed to browsers (Origin ${APP}): ${exposed}`);
-  const preOld = await fetch(`${OLD}/v1/blocks`, { method: "OPTIONS", headers: { Origin: APP, "Access-Control-Request-Method": "PUT", "Access-Control-Request-Headers": "authorization,content-type,if-match" } });
-  check(!/If-Match/i.test(preOld.headers.get("access-control-allow-headers") || ""), `the OLD Worker's preflight does not allow If-Match (${preOld.headers.get("access-control-allow-headers")}) — why the client gates the header`);
+  if (!REMOTE) {
+    const preOld = await fetch(`${OLD}/v1/blocks`, { method: "OPTIONS", headers: { Origin: APP, "Access-Control-Request-Method": "PUT", "Access-Control-Request-Headers": "authorization,content-type,if-match" } });
+    check(!/If-Match/i.test(preOld.headers.get("access-control-allow-headers") || ""), `the OLD Worker's preflight does not allow If-Match (${preOld.headers.get("access-control-allow-headers")}) — why the client gates the header`);
+  } else if (REMOTE.saved) {
+    const back = await put(REMOTE.saved);
+    check(back.ok, `deployment blob restored (${REMOTE.saved.length} bytes, now at ${back.headers.get("etag")})`);
+  }
 }
 
 // ============================================================================
-console.log("\n--- (5) first-upload race on an empty store (etagDoesNotMatch \"*\"), recorded");
-{
+if (!REMOTE) console.log("\n--- (5) first-upload race on an empty store (etagDoesNotMatch \"*\"), recorded");
+if (!REMOTE) {
   const w = startWorker("empty", ROOT, NEW_PORT + 2, path.join(scratch, "state-empty"));
   const base = `https://localhost:${NEW_PORT + 2}`;
   check(await waitFor(async () => (await fetch(`${base}/v1/blocks`)).status === 401, 90000), "third Worker on an empty store up");
@@ -313,6 +342,6 @@ console.log("\n--- (5) first-upload race on an empty store (etagDoesNotMatch \"*
   void w;
 }
 
-console.log(`\n${failures === 0 ? "ALL PASSED" : failures + " FAILURE(S)"}`);
-ws.close();
+console.log(`\n${summary()}`);
+if (!REMOTE) ws.close();
 process.exit(failures ? 1 : 0);
