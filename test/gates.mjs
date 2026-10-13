@@ -174,7 +174,9 @@ async function device(name) {
   };
   d.blocksTrace = () => trace.filter((r) => r.url.endsWith("/v1/blocks") && r.method !== "OPTIONS").map((r) => `${r.method} ${r.status}${r.headers["If-Match"] ? ` If-Match=${r.headers["If-Match"]}` : ""}${r.headers["If-None-Match"] ? ` If-None-Match=${r.headers["If-None-Match"]}` : ""}${r.resHeaders?.etag || r.resHeaders?.ETag ? ` ETag=${r.resHeaders.etag || r.resHeaders.ETag}` : ""}`);
   d.preflights = () => trace.filter((r) => r.url.endsWith("/v1/blocks") && r.type === "Preflight").map((r) => `OPTIONS ${r.status} ${r.headers["Access-Control-Request-Headers"] || ""}`);
-  d.corsFailures = () => failed.filter((f) => f.url?.includes("/v1/"));
+  // Only requests to a sync Worker count. The app also asks its own origin for GET /v1/health (the
+  // account door, txtshell f64cfe3); on the static app server here that is aborted, and it isn't sync.
+  d.corsFailures = () => failed.filter((f) => { try { return [NEW, OLD].includes(new URL(f.url).origin); } catch { return false; } });
   return d;
 }
 
