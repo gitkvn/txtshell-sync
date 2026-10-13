@@ -214,7 +214,7 @@ console.log(`\n--- (2) NEW app × OLD Worker (${OLD_WORKER_REV}): byte-identical
   check(await C.eval(`typeof isCentral === "function" && isCentral() === false`), "new app, passphrase mode");
   await C.encryptSetup(); await C.add("c1");
   const hint = await C.syncSetup(OLD);
-  check(/^Synced — 1 block/.test(hint), `new app /sync setup against the OLD Worker: "${hint}"`);
+  check(/^Synced — 1 note/.test(hint), `new app /sync setup against the OLD Worker: "${hint}"`);
   check(await waitFor(() => C.toast().then((t) => /Update your sync Worker/.test(t)), 8000), `legacy hint shown once: "${await C.toast()}"`);
   await C.add("c2"); await C.settle();
   await C.pull(); await C.settle();
@@ -234,7 +234,7 @@ console.log("\n--- (3) NEW app × NEW Worker: generations, 304, 412 → pull →
   const D = await device("new-app-D");
   await D.encryptSetup(); await D.add("d1");
   const hint = await D.syncSetup(NEW);
-  check(/^Synced — 1 block/.test(hint), `new app /sync setup against the new Worker: "${hint}" (the read-back is a 304 against the pushed generation)`);
+  check(/^Synced — 1 note/.test(hint), `new app /sync setup against the new Worker: "${hint}" (the read-back is a 304 against the pushed generation)`);
   // The single-user Worker's store carries over from part (1): generations are relative to what
   // the first push returned, not absolute.
   const gen = async (d) => Number(await d.meta("sync-last-synced-generation"));
@@ -255,25 +255,18 @@ console.log("\n--- (3) NEW app × NEW Worker: generations, 304, 412 → pull →
   check((await gen(D)) === gE, `D and E agree on the generation (${gE})`);
   await D.add("d3"); await D.settle();
   check((await gen(D)) === gE + 1, `D pushes → g${gE + 1} while E still believes g${gE}`);
-  const putsBefore = E.blocksTrace().filter((x) => x.startsWith("PUT")).length;
-  await E.add("e1"); // → push If-Match g<gE> → 412 → quiet pull → card
-  check(await waitFor(() => E.view().then((v) => v === "pull-conflict"), 15000), `E's stale push → 412 → pull → card (${await E.view()})`);
-  t = E.blocksTrace().slice(-2);
-  check(new RegExp(`PUT 412 If-Match="g${gE}"`).test(t[0]) && /GET 200/.test(t[1]), `trace: ${t.join(" → ")}`);
-  await sleep(1500);
-  check(E.blocksTrace().filter((x) => x.startsWith("PUT")).length === putsBefore + 1, "push-hold: zero PUTs while the card is showing");
-  const title = await E.eval(`vaultOverlay.querySelector(".vault-title")?.textContent || ""`);
-  check(/diverged/.test(title), `card: "${title}"`);
-  await E.click("keep"); await waitFor(() => E.view().then((v) => v === null)); await E.settle();
-  t = E.blocksTrace().at(-1);
-  check(new RegExp(`PUT 204 If-Match="g${gE + 1}" ETag="g${gE + 2}"`).test(t) && (await gen(E)) === gE + 2, `Keep local → PUT If-Match "g${gE + 1}" → 204 g${gE + 2}: ${t}`);
-  await D.pull();
-  check(await waitFor(() => D.view().then((v) => v === "pull-conflict")), "D /pull → card (E's overwrite)");
-  await D.click("replace"); await waitFor(() => D.view().then((v) => v === null)); await D.settle();
-  // Replace adopts the cloud set and records its generation; under conditional sync the app no
-  // longer re-pushes the identical set (that only moved the generation under every other device).
+  await E.add("e1"); // → push If-Match g<gE> → 412 → quiet pull → the merge (txtshell Part B) → push
+  await E.settle();
+  check((await E.view()) === null, "E's stale push → 412 → pull → merged, no card");
+  const tr = E.blocksTrace();
+  const i412 = tr.findIndex((x) => new RegExp(`PUT 412 If-Match="g${gE}"`).test(x));
+  check(i412 >= 0 && /GET 200/.test(tr[i412 + 1] || "") && new RegExp(`PUT 204 If-Match="g${gE + 1}" ETag="g${gE + 2}"`).test(tr.at(-1)) && (await gen(E)) === gE + 2, `trace: ${tr.slice(Math.max(0, i412)).join(" → ")}`);
+  check((await E.entries()).includes("d3") && (await E.entries()).includes("e1"), "E kept its e1 and took D's d3");
+  await D.pull(); await D.settle();
+  // The merge applies E's set and records its generation; the identical set is not pushed back
+  // (that only moved the generation under every other device).
   const putsD = D.blocksTrace().filter((x) => x.startsWith("PUT"));
-  check((await D.entries()).includes("e1") && (await gen(D)) === gE + 2 && !putsD.some((x) => x.includes(`If-Match="g${gE + 2}"`)), `D Replace → E's set at the pulled generation ${gE + 2}, no re-push of the identical set (last PUT: ${putsD.at(-1)})`);
+  check((await D.view()) === null && (await D.entries()).includes("e1") && (await gen(D)) === gE + 2 && !putsD.some((x) => x.includes(`If-Match="g${gE + 2}"`)), `D pulls E's merge: no card, at g${gE + 2}, no re-push (last PUT: ${putsD.at(-1)})`);
 }
 
 } // end of the local-only parts (1)–(3)
